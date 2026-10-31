@@ -3186,8 +3186,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
-            // local: the glyph's own (logical) cell, not the one at its visual x.
-            const cell = cell_raws[lx];
+            // An RTL wide glyph is drawn from its spacer tail's column.
+            const glyph_lx = if (cell_raws[lx].wide == .spacer_tail) lx - 1 else lx;
+            const cell = cell_raws[glyph_lx];
             const cp = cell.codepoint();
 
             // Render
@@ -3209,7 +3210,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         } else .none,
                     .constraint_width = constraintWidth(
                         cell_raws,
-                        x,
+                        glyph_lx,
                         cols,
                     ),
                 },

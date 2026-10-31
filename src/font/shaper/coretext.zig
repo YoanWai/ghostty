@@ -2829,6 +2829,43 @@ test "shape hebrew RTL" {
     try testing.expectEqual(@as(usize, 1), count);
 }
 
+test "shape wide character inside RTL text starts at its leftmost column" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = try testShaperWithFont(alloc, .julia_mono);
+    defer testdata.deinit();
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 30, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    try s.nextSlice("שלום 👋 עולם");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var shaper = &testdata.shaper;
+    var it = shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = state.row_data.get(0).cells.slice(),
+    });
+
+    // The emoji is logical cells 5-6, which an RTL run draws at visual 5-6.
+    var glyph_at_5 = false;
+    while (try it.next(alloc)) |run| {
+        const cells = try shaper.shape(run);
+        for (cells) |cell| {
+            const x = run.offset + cell.x;
+            try testing.expect(x != 6);
+            if (x == 5) glyph_at_5 = true;
+        }
+    }
+    try testing.expect(glyph_at_5);
+}
+
 test "shape arabic with tashkeel at EOL" {
     const testing = std.testing;
     const alloc = testing.allocator;

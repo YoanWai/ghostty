@@ -122,10 +122,7 @@ pub const RunIterator = struct {
             // Find the run boundary in visual order.
             var j: usize = self.i;
             while (j < bidi_run_end) : (j += 1) {
-                const logical_j: usize = @intCast(itijah.logicalIndexForVisual(
-                    bidi_run,
-                    @intCast(j),
-                ));
+                const logical_j = glyphCellAtVisual(cells, bidi_run, j) orelse continue;
                 const cell: *const terminal.page.Cell = &cells[logical_j];
 
                 // If we have a selection and we're at a boundary point, then
@@ -135,12 +132,6 @@ pub const RunIterator = struct {
                         if (bounds[0] > 0 and j == bounds[0]) break;
                         if (bounds[1] > 0 and j == bounds[1] + 1) break;
                     }
-                }
-
-                // If we're a spacer, then we ignore it.
-                switch (cell.wide) {
-                    .narrow, .wide => {},
-                    .spacer_head, .spacer_tail => continue,
                 }
 
                 // If our cell attributes are changing, then we split the run.
@@ -255,14 +246,15 @@ pub const RunIterator = struct {
 
             var hasher = Hasher.init(0);
             for (logical_start..logical_end) |logical_j| {
-                const visual_idx = itijah.visualIndexForLogical(bidi_run, @intCast(logical_j));
-                const cluster: u32 = visual_idx - @as(u32, @intCast(self.i));
                 const cell: *const terminal.page.Cell = &cells[logical_j];
 
                 switch (cell.wide) {
                     .narrow, .wide => {},
                     .spacer_head, .spacer_tail => continue,
                 }
+
+                const visual_idx = glyphVisualIndex(cells, bidi_run, logical_j);
+                const cluster: u32 = visual_idx - @as(u32, @intCast(self.i));
 
                 const presentation = presentationForCell(cell, graphemes[logical_j]);
                 const font_info = font_infos.items[visual_idx];
@@ -563,6 +555,26 @@ fn presentationForCell(cell: *const terminal.page.Cell, grapheme: []const u21) ?
         0xFE0F => .emoji,
         else => null,
     };
+}
+
+/// The logical cell whose glyph starts at a visual column, or null when the
+/// column only continues a glyph. A wide glyph starts at its leftmost column,
+/// which in an RTL run is its spacer tail.
+fn glyphCellAtVisual(cells: []const terminal.page.Cell, run: VisualRun, visual: usize) ?usize {
+    const logical: usize = @intCast(itijah.logicalIndexForVisual(run, @intCast(visual)));
+    return switch (cells[logical].wide) {
+        .narrow => logical,
+        .spacer_head => null,
+        .wide => if (run.is_rtl and logical + 1 < run.logicalEnd()) null else logical,
+        .spacer_tail => if (run.is_rtl and logical > run.logical_start) logical - 1 else null,
+    };
+}
+
+fn glyphVisualIndex(cells: []const terminal.page.Cell, run: VisualRun, logical: usize) u32 {
+    const spans_tail = run.is_rtl and
+        cells[logical].wide == .wide and
+        logical + 1 < run.logicalEnd();
+    return itijah.visualIndexForLogical(run, @intCast(if (spans_tail) logical + 1 else logical));
 }
 
 fn findVisualRun(visual_runs: []const VisualRun, visual_index: usize) ?VisualRun {
