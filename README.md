@@ -19,6 +19,22 @@
   </p>
 </p>
 
+> [!NOTE]
+> **Unofficial fork with Hebrew and Arabic (RTL) support.**
+>
+> This branch builds on [ghostty-org/ghostty#11079](https://github.com/ghostty-org/ghostty/pull/11079)
+> by [DiaaEddin](https://github.com/DiaaEddin), with fixes from
+> [AryanHamedani](https://github.com/AryanHamedani) and
+> [nagieeb0](https://github.com/nagieeb0) posted in that thread.
+>
+> - Hebrew and Arabic letters shape and join correctly.
+> - A line that starts in Hebrew or Arabic reads right to left, including its punctuation.
+> - Colors, the cursor and emoji stay on the right letters.
+> - Indents, bullets, prompts and box borders keep their place, so TUIs keep their layout.
+>
+> Known limits: selecting and copying RTL text can come out in the wrong order,
+> and RTL text on both sides of a side-by-side pane divider can swap across it.
+
 ## About
 
 Ghostty is a terminal emulator that differentiates itself by being
