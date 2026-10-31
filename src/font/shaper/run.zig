@@ -327,6 +327,22 @@ pub const RunIterator = struct {
         return null;
     }
 
+    /// Logical column drawn at visual column `visual` (identity outside bidi runs).
+    pub fn logicalIndex(self: *const RunIterator, visual: usize) usize {
+        const vr = findVisualRun(self.visual_runs, visual) orelse return visual;
+        return @intCast(itijah.logicalIndexForVisual(vr, @intCast(visual)));
+    }
+
+    /// Visual column where logical column `logical` is drawn (identity outside bidi runs).
+    pub fn visualIndex(self: *RunIterator, alloc: Allocator, logical: usize) !usize {
+        if (!self.layout_ready) try self.resolveRowLayout(alloc, self.opts.cells.items(.raw));
+        for (self.visual_runs) |run| {
+            if (logical >= run.logical_start and logical < run.logicalEnd())
+                return @intCast(itijah.visualIndexForLogical(run, @intCast(logical)));
+        }
+        return logical;
+    }
+
     fn resolveRowLayout(
         self: *RunIterator,
         alloc: Allocator,
