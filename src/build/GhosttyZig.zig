@@ -138,6 +138,7 @@ fn initVt(
 
     // We need uucode for grapheme break support
     vt.addImport("uucode", deps.uucode_mod);
+    deps.addItijah(b, vt, cfg.target, cfg.optimize);
 
     // We need wuffs for Kitty graphics pixel operations (format
     // conversion and alpha blending). Unlike pure Zig dependencies
