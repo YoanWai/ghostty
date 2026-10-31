@@ -31,6 +31,8 @@ pub const Shaper = struct {
     bidi_layout_scratch: itijah.VisualLayoutScratch = .{},
     /// Scratch for the run iterator's per-cell font lookups.
     font_info_scratch: std.ArrayListUnmanaged(font.shape.RunIterator.FontInfo) = .{},
+    /// Scratch for the run iterator's row layout runs.
+    bidi_runs_scratch: std.ArrayListUnmanaged(itijah.VisualRun) = .{},
 
     const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
     const CodepointList = std.ArrayListUnmanaged(Codepoint);
@@ -68,6 +70,7 @@ pub const Shaper = struct {
         self.run_state.deinit(self.alloc);
         self.bidi_layout_scratch.deinit(self.alloc);
         self.font_info_scratch.deinit(self.alloc);
+        self.bidi_runs_scratch.deinit(self.alloc);
     }
 
     pub fn endFrame(self: *const Shaper) void {
@@ -150,6 +153,10 @@ pub const Shaper = struct {
 
         pub fn fontInfoScratch(self: RunIteratorHook) *std.ArrayListUnmanaged(font.shape.RunIterator.FontInfo) {
             return &self.shaper.font_info_scratch;
+        }
+
+        pub fn bidiRunsScratch(self: RunIteratorHook) *std.ArrayListUnmanaged(itijah.VisualRun) {
+            return &self.shaper.bidi_runs_scratch;
         }
     };
 };

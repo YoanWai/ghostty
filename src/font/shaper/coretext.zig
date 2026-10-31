@@ -90,6 +90,8 @@ pub const Shaper = struct {
     bidi_layout_scratch: itijah.VisualLayoutScratch = .{},
     /// Scratch for the run iterator's per-cell font lookups.
     font_info_scratch: std.ArrayListUnmanaged(font.shape.RunIterator.FontInfo) = .{},
+    /// Scratch for the run iterator's row layout runs.
+    bidi_runs_scratch: std.ArrayListUnmanaged(itijah.VisualRun) = .{},
 
     const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
     const CodepointList = std.ArrayListUnmanaged(Codepoint);
@@ -258,6 +260,7 @@ pub const Shaper = struct {
         self.typesetter_attr_dict_rtl.release();
         self.bidi_layout_scratch.deinit(self.alloc);
         self.font_info_scratch.deinit(self.alloc);
+        self.bidi_runs_scratch.deinit(self.alloc);
 
         {
             for (self.cached_fonts.items) |ft| {
@@ -799,6 +802,10 @@ pub const Shaper = struct {
 
         pub fn fontInfoScratch(self: RunIteratorHook) *std.ArrayListUnmanaged(font.shape.RunIterator.FontInfo) {
             return &self.shaper.font_info_scratch;
+        }
+
+        pub fn bidiRunsScratch(self: RunIteratorHook) *std.ArrayListUnmanaged(itijah.VisualRun) {
+            return &self.shaper.bidi_runs_scratch;
         }
     };
 
@@ -2864,6 +2871,54 @@ test "shape wide character inside RTL text starts at its leftmost column" {
         }
     }
     try testing.expect(glyph_at_5);
+}
+
+fn testVisualIndex(alloc: Allocator, text: []const u8, logical: usize) !usize {
+    var testdata = try testShaperWithFont(alloc, .julia_mono);
+    defer testdata.deinit();
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 60, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    try s.nextSlice(text);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var it = testdata.shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = state.row_data.get(0).cells.slice(),
+    });
+    return try it.visualIndex(alloc, logical);
+}
+
+test "RTL line reads right to left with markers and frames kept in place" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const sentence = "גרסה 1.3 של Ghostty עם תמיכה ב-RTL עובדת.";
+    try testing.expectEqual(@as(usize, 40), try testVisualIndex(alloc, sentence, 0));
+    try testing.expectEqual(@as(usize, 0), try testVisualIndex(alloc, sentence, 40));
+
+    const bulleted = "● שלום עולם";
+    try testing.expectEqual(@as(usize, 0), try testVisualIndex(alloc, bulleted, 0));
+    try testing.expectEqual(@as(usize, 10), try testVisualIndex(alloc, bulleted, 2));
+
+    const framed = "│ שלום  │";
+    try testing.expectEqual(@as(usize, 0), try testVisualIndex(alloc, framed, 0));
+    try testing.expectEqual(@as(usize, 8), try testVisualIndex(alloc, framed, 8));
+    try testing.expectEqual(@as(usize, 5), try testVisualIndex(alloc, framed, 2));
+
+    const trailing_emoji = "שלום 👋";
+    try testing.expectEqual(@as(usize, 6), try testVisualIndex(alloc, trailing_emoji, 0));
+    try testing.expectEqual(@as(usize, 2), try testVisualIndex(alloc, trailing_emoji, 4));
+    try testing.expectEqual(@as(usize, 0), try testVisualIndex(alloc, trailing_emoji, 6));
+
+    const command = "git commit -m \"תיקון\"";
+    try testing.expectEqual(@as(usize, 0), try testVisualIndex(alloc, command, 0));
 }
 
 test "shape arabic with tashkeel at EOL" {

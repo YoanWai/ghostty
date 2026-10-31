@@ -358,21 +358,18 @@ pub const RunIterator = struct {
         // run. Skip building bidi inputs and resolving UAX #9 for them,
         // since this runs for every dirty row on every frame.
         if (!needsBidi(cells[0..self.max])) {
-            self.ltr_run = .{.{
-                .visual_start = 0,
-                .logical_start = 0,
-                .len = @intCast(self.max),
-                .is_rtl = false,
-            }};
+            self.ltr_run = .{ltrRun(0, self.max)};
             self.visual_runs = &self.ltr_run;
             return;
         }
 
-        // Build bidi inputs from logical cells and derive visual runs in a
-        // paragraph that is always anchored LTR (terminal line model).
-        var bidi_codepoints = try alloc.alloc(u21, self.max);
+        // The text reads in the direction of its first strong character.
+        // Leading markers and a trailing frame keep their columns so prompts,
+        // bullets and box borders stay where TUIs drew them.
+        const content = reorderedRange(cells[0..self.max]);
+        var bidi_codepoints = try alloc.alloc(u21, content.end - content.start);
         defer alloc.free(bidi_codepoints);
-        for (cells[0..self.max], 0..) |cell, i| {
+        for (cells[content.start..content.end], 0..) |cell, i| {
             bidi_codepoints[i] = bidiCodepoint(cell);
         }
 
@@ -380,9 +377,20 @@ pub const RunIterator = struct {
             alloc,
             self.hooks.bidiLayoutScratch(),
             bidi_codepoints,
-            .{ .base_dir = .ltr },
+            .{ .base_dir = .auto_ltr },
         );
-        self.visual_runs = layout.runs;
+
+        const runs = self.hooks.bidiRunsScratch();
+        runs.clearRetainingCapacity();
+        if (content.start > 0) try runs.append(alloc, ltrRun(0, content.start));
+        for (layout.runs) |run| {
+            var shifted = run;
+            shifted.visual_start += @intCast(content.start);
+            shifted.logical_start += @intCast(content.start);
+            try runs.append(alloc, shifted);
+        }
+        if (content.end < self.max) try runs.append(alloc, ltrRun(content.end, self.max));
+        self.visual_runs = runs.items;
     }
 
     fn addCodepoint(self: *RunIterator, hasher: anytype, cp: u32, cluster: u32) !void {
@@ -532,6 +540,48 @@ fn needsBidi(cells: []const terminal.page.Cell) bool {
         }
     }
     return false;
+}
+
+const CellRange = struct { start: usize, end: usize };
+
+fn reorderedRange(cells: []const terminal.page.Cell) CellRange {
+    var start: usize = 0;
+    while (start < cells.len and isLeadingMarker(bidiCodepoint(cells[start]))) start += 1;
+    var end = cells.len;
+    while (end > start and isTrailingFrame(cells[end - 1])) end -= 1;
+    return .{ .start = start, .end = end };
+}
+
+fn isLeadingMarker(cp: u21) bool {
+    if (uucode.get(.is_emoji_presentation, cp)) return false;
+    return switch (uucode.get(.bidi_class, cp)) {
+        .whitespace,
+        .other_neutrals,
+        .segment_separator,
+        .common_number_separator,
+        .european_number_separator,
+        .european_number_terminator,
+        .boundary_neutral,
+        .nonspacing_mark,
+        => true,
+        else => false,
+    };
+}
+
+fn isTrailingFrame(cell: terminal.page.Cell) bool {
+    if (cell.wide == .spacer_tail) return false;
+    const cp = bidiCodepoint(cell);
+    const box_drawing_and_blocks = cp >= 0x2500 and cp <= 0x259F;
+    return cp == ' ' or box_drawing_and_blocks;
+}
+
+fn ltrRun(start: usize, end: usize) VisualRun {
+    return .{
+        .visual_start = @intCast(start),
+        .logical_start = @intCast(start),
+        .len = @intCast(end - start),
+        .is_rtl = false,
+    };
 }
 
 fn bidiCodepoint(cell: terminal.page.Cell) u21 {
