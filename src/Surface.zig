@@ -28,6 +28,7 @@ const unicode = @import("unicode/main.zig");
 const rendererpkg = @import("renderer.zig");
 const termio = @import("termio.zig");
 const font = @import("font/main.zig");
+const font_run = @import("font/shaper/run.zig");
 const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
@@ -242,6 +243,7 @@ const Mouse = struct {
 
     /// The last x/y sent for mouse reports.
     event_point: ?terminal.point.Coordinate = null,
+    row_layout: font_run.RowLayout = .{},
 
     /// The pressure stage for the mouse. This should always be none if
     /// the mouse is not pressed.
@@ -855,6 +857,7 @@ pub fn deinit(self: *Surface) void {
     self.renderer_thread.deinit();
     self.io_thread.deinit();
     self.mouse.selection_gesture.deinit(&self.io.terminal);
+    self.mouse.row_layout.deinit(self.alloc);
     self.io.deinit();
 
     if (self.inspector) |v| {
@@ -3845,6 +3848,17 @@ fn mouseReport(
         break :opts opts;
     };
 
+    const logical_pos = mouseReportPosition(
+        self.alloc,
+        &self.mouse.row_layout,
+        &self.io.terminal,
+        self.size,
+        pos,
+    ) catch |err| {
+        log.warn("error mapping mouse position err={}", .{err});
+        return;
+    };
+
     var data: termio.Message.WriteReq.Small.Array = undefined;
     var writer: std.Io.Writer = .fixed(&data);
     input.mouse_encode.encode(&writer, .{
@@ -3852,8 +3866,8 @@ fn mouseReport(
         .action = action,
         .mods = mods,
         .pos = .{
-            .x = pos.x,
-            .y = pos.y,
+            .x = logical_pos.x,
+            .y = logical_pos.y,
         },
     }, encoding_opts) catch |err| switch (err) {
         error.WriteFailed => {
@@ -3872,6 +3886,30 @@ fn mouseReport(
         .data = data,
         .len = @intCast(written.len),
     } }, .locked);
+}
+
+fn mouseReportPosition(
+    alloc: Allocator,
+    layout: *font_run.RowLayout,
+    t: *terminal.Terminal,
+    size: rendererpkg.Size,
+    pos: apprt.CursorPos,
+) !apprt.CursorPos {
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = pos.x, .y = pos.y } };
+    const pixels = coord.convert(.terminal, size).terminal;
+    const grid = size.grid();
+    if (pixels.x < 0 or pixels.y < 0 or
+        pixels.x >= @as(f64, @floatFromInt(grid.columns)) * @as(f64, @floatFromInt(size.cell.width)) or
+        pixels.y >= @as(f64, @floatFromInt(grid.rows)) * @as(f64, @floatFromInt(size.cell.height))) return pos;
+
+    const visual = coord.convert(.grid, size).grid;
+    const pin = t.screens.active.pages.pin(.{ .viewport = .{ .x = visual.x, .y = visual.y } }) orelse return pos;
+    const logical = try layout.logicalIndex(alloc, pin.cells(.all), visual.x);
+    const delta = @as(f64, @floatFromInt(logical)) - @as(f64, @floatFromInt(visual.x));
+    return .{
+        .x = @floatCast(pos.x + delta * @as(f64, @floatFromInt(size.cell.width))),
+        .y = pos.y,
+    };
 }
 
 /// Returns true if the shift modifier is allowed to be captured by modifier
@@ -6743,4 +6781,100 @@ test "promptClickRelativeRow" {
         );
         try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
     }
+}
+
+test "mouseReportPosition maps RTL links in every mouse format" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 80, .rows = 3 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("● שלום https://example.com");
+
+    var layout: font_run.RowLayout = .{};
+    defer layout.deinit(alloc);
+    const size: rendererpkg.Size = .{
+        .screen = .{ .width = 806, .height = 70 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{ .left = 3, .right = 3, .top = 5, .bottom = 5 },
+    };
+    const pos = try mouseReportPosition(alloc, &layout, &t, size, .{ .x = 27.5, .y = 9 });
+    try testing.expectEqual(@as(f32, 77.5), pos.x);
+    try testing.expectEqual(@as(f32, 9), pos.y);
+
+    inline for (.{
+        .{ terminal.MouseFormat.x10, "\x1b[M (!" },
+        .{ terminal.MouseFormat.utf8, "\x1b[M (!" },
+        .{ terminal.MouseFormat.sgr, "\x1b[<0;8;1M" },
+        .{ terminal.MouseFormat.urxvt, "\x1b[32;8;1M" },
+        .{ terminal.MouseFormat.sgr_pixels, "\x1b[<0;75;4M" },
+    }) |case| {
+        var data: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&data);
+        try input.mouse_encode.encode(&writer, .{
+            .button = .left,
+            .pos = .{ .x = pos.x, .y = pos.y },
+        }, .{ .event = .normal, .format = case[0], .size = size });
+        try testing.expectEqualStrings(case[1], writer.buffered());
+    }
+}
+
+test "mouseReportPosition preserves LTR cells padding and offscreen releases" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 80, .rows = 3 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("● שלום https://example.com\r\nread https://example.com");
+
+    var layout: font_run.RowLayout = .{};
+    defer layout.deinit(alloc);
+    const size: rendererpkg.Size = .{
+        .screen = .{ .width = 806, .height = 70 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{ .left = 3, .right = 3, .top = 5, .bottom = 5 },
+    };
+    for ([_]apprt.CursorPos{
+        .{ .x = 27.5, .y = 29 },
+        .{ .x = 7.5, .y = 9 },
+        .{ .x = 500, .y = 9 },
+        .{ .x = -1, .y = 9 },
+        .{ .x = 1, .y = 9 },
+        .{ .x = 27.5, .y = 1 },
+        .{ .x = 900, .y = 9 },
+        .{ .x = 27.5, .y = 80 },
+    }) |pos| {
+        const logical = try mouseReportPosition(alloc, &layout, &t, size, pos);
+        try testing.expectEqual(pos.x, logical.x);
+        try testing.expectEqual(pos.y, logical.y);
+    }
+}
+
+test "mouseReportPosition follows the visible row through scrollback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 80, .rows = 2 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("● שלום https://example.com\r\nplain row\r\ncurrent row");
+
+    var layout: font_run.RowLayout = .{};
+    defer layout.deinit(alloc);
+    const size: rendererpkg.Size = .{
+        .screen = .{ .width = 800, .height = 40 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    const pos: apprt.CursorPos = .{ .x = 25, .y = 5 };
+    const active = try mouseReportPosition(alloc, &layout, &t, size, pos);
+    try testing.expectEqual(pos.x, active.x);
+    t.scrollViewport(.top);
+    const scrolled = try mouseReportPosition(alloc, &layout, &t, size, pos);
+    try testing.expectEqual(@as(f32, 75), scrolled.x);
+    t.scrollViewport(.bottom);
+    const restored = try mouseReportPosition(alloc, &layout, &t, size, pos);
+    try testing.expectEqual(pos.x, restored.x);
 }

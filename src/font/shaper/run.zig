@@ -363,34 +363,12 @@ pub const RunIterator = struct {
             return;
         }
 
-        // The text reads in the direction of its first strong character.
-        // Leading markers and a trailing frame keep their columns so prompts,
-        // bullets and box borders stay where TUIs drew them.
-        const content = reorderedRange(cells[0..self.max]);
-        var bidi_codepoints = try alloc.alloc(u21, content.end - content.start);
-        defer alloc.free(bidi_codepoints);
-        for (cells[content.start..content.end], 0..) |cell, i| {
-            bidi_codepoints[i] = bidiCodepoint(cell);
-        }
-
-        const layout = try itijah.resolveVisualLayoutScratch(
+        self.visual_runs = try resolveVisualRuns(
             alloc,
             self.hooks.bidiLayoutScratch(),
-            bidi_codepoints,
-            .{ .base_dir = .auto_ltr },
+            self.hooks.bidiRunsScratch(),
+            cells[0..self.max],
         );
-
-        const runs = self.hooks.bidiRunsScratch();
-        runs.clearRetainingCapacity();
-        if (content.start > 0) try runs.append(alloc, ltrRun(0, content.start));
-        for (layout.runs) |run| {
-            var shifted = run;
-            shifted.visual_start += @intCast(content.start);
-            shifted.logical_start += @intCast(content.start);
-            try runs.append(alloc, shifted);
-        }
-        if (content.end < self.max) try runs.append(alloc, ltrRun(content.end, self.max));
-        self.visual_runs = runs.items;
     }
 
     fn addCodepoint(self: *RunIterator, hasher: anytype, cp: u32, cluster: u32) !void {
@@ -502,6 +480,60 @@ pub const RunIterator = struct {
         unreachable;
     }
 };
+
+pub const RowLayout = struct {
+    scratch: itijah.VisualLayoutScratch = .{},
+    runs: std.ArrayListUnmanaged(VisualRun) = .empty,
+
+    pub fn deinit(self: *RowLayout, alloc: Allocator) void {
+        self.scratch.deinit(alloc);
+        self.runs.deinit(alloc);
+    }
+
+    pub fn logicalIndex(self: *RowLayout, alloc: Allocator, cells: []const terminal.page.Cell, visual: usize) !usize {
+        var end = cells.len;
+        while (end > 0 and cells[end - 1].isEmpty()) end -= 1;
+        if (visual >= end or !needsBidi(cells[0..end])) return visual;
+        const runs = try resolveVisualRuns(alloc, &self.scratch, &self.runs, cells[0..end]);
+        const run = findVisualRun(runs, visual) orelse return visual;
+        return @intCast(itijah.logicalIndexForVisual(run, @intCast(visual)));
+    }
+};
+
+fn resolveVisualRuns(
+    alloc: Allocator,
+    scratch: *itijah.VisualLayoutScratch,
+    runs: *std.ArrayListUnmanaged(VisualRun),
+    cells: []const terminal.page.Cell,
+) ![]const VisualRun {
+    // The text reads in the direction of its first strong character.
+    // Leading markers and a trailing frame keep their columns so prompts,
+    // bullets and box borders stay where TUIs drew them.
+    const content = reorderedRange(cells);
+    var bidi_codepoints = try alloc.alloc(u21, content.end - content.start);
+    defer alloc.free(bidi_codepoints);
+    for (cells[content.start..content.end], 0..) |cell, i| {
+        bidi_codepoints[i] = bidiCodepoint(cell);
+    }
+
+    const layout = try itijah.resolveVisualLayoutScratch(
+        alloc,
+        scratch,
+        bidi_codepoints,
+        .{ .base_dir = .auto_ltr },
+    );
+
+    runs.clearRetainingCapacity();
+    if (content.start > 0) try runs.append(alloc, ltrRun(0, content.start));
+    for (layout.runs) |run| {
+        var shifted = run;
+        shifted.visual_start += @intCast(content.start);
+        shifted.logical_start += @intCast(content.start);
+        try runs.append(alloc, shifted);
+    }
+    if (content.end < cells.len) try runs.append(alloc, ltrRun(content.end, cells.len));
+    return runs.items;
+}
 
 /// Returns true if UAX #9 could resolve any cell in an LTR paragraph to a
 /// non-zero level. Only strong RTL, Arabic numbers and explicit embeddings,
@@ -690,4 +722,24 @@ test "needsBidi detects RTL content" {
     // Persian digits are European numbers (EN), so alone they stay LTR.
     const digits = testCells("order ۱۴۰۵");
     try testing.expect(!needsBidi(&digits));
+}
+
+test "RowLayout maps visual columns with markers frames and mixed text" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var layout: RowLayout = .{};
+    defer layout.deinit(alloc);
+
+    inline for (.{
+        .{ "● שלום https://example.com", 2, 7 },
+        .{ "● مرحبا https://example.com", 2, 8 },
+        .{ "│ שלום  │", 2, 5 },
+        .{ "│ שלום  │", 0, 0 },
+        .{ "│ שלום  │", 8, 8 },
+        .{ "read https://example.com", 5, 5 },
+    }) |case| {
+        const cells = testCells(case[0]);
+        try testing.expectEqual(@as(usize, case[2]), try layout.logicalIndex(alloc, &cells, case[1]));
+    }
+    try testing.expectEqual(@as(usize, 0), try layout.logicalIndex(alloc, &.{}, 0));
 }
