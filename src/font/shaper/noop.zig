@@ -34,8 +34,8 @@ pub const Shaper = struct {
     /// Scratch for the run iterator's row layout runs.
     bidi_runs_scratch: std.ArrayListUnmanaged(itijah.VisualRun) = .empty,
 
-    const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
-    const CodepointList = std.ArrayListUnmanaged(Codepoint);
+    const CellBuf = std.ArrayList(font.shape.Cell);
+    const CodepointList = std.ArrayList(Codepoint);
     const Codepoint = struct {
         codepoint: u32,
         cluster: u32,
